@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mctb
+          POSTGRES_PASSWORD: mctb
+          POSTGRES_DB: mctb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://mctb:mctb@localhost:5432/mctb
+      REDIS_URL: redis://localhost:6379/0
+      # Twilio/AI are mocked in tests — no real credentials needed in CI.
+      TWILIO_ACCOUNT_SID: ACtest0000000000000000000000000000
+      TWILIO_AUTH_TOKEN: test-token-not-real
+      TWILIO_REGION: ie1
+      PUBLIC_BASE_URL: https://ci.example.invalid
+      AI_SERVICE_URL: http://localhost:8080
+      AI_TIMEOUT_SECONDS: "8"
+      SENTRY_DSN: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: mypy
+        run: uv run mypy .
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+
+      - name: pytest
+        run: uv run pytest

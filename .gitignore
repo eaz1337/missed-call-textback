@@ -1,0 +1,42 @@
+# =========================
+# Virtual Environments (Strict exclusion)
+# =========================
+*venv*/
+*venv*
+.venv/
+env/
+.env_python/
+
+# =========================
+# Secrets and Configuration (CRITICAL!)
+# =========================
+# Never commit API keys, passwords, or secrets!
+.env
+.env.*
+*.env
+!.env.example
+
+# =========================
+# Python and Cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+celerybeat-schedule
+*.log
+
+# =========================
+# IDEs and Tools
+# =========================
+.vscode/
+*.code-workspace
+.claude/
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
