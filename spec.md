@@ -4,7 +4,7 @@
 |---|---|
 | Version | 1.0 |
 | Status | For implementation |
-| Target market | Poland (+48) |
+| Target market | Poland (+48) — first entry in a country registry (section 4.0), not a hardcoded assumption |
 | Dependencies | Twilio (Voice + SMS), Phase 1 AI module |
 
 ---
@@ -171,7 +171,7 @@ def process_missed_call(self, call_sid: str):
     if db.is_opted_out(client.id, caller):
         event.mark("opted_out")
         return
-    if not is_polish_mobile(caller):  # section 7.5
+    if not is_mobile_number(caller, client.country_code):  # section 7.5
         event.mark("non_mobile")
         return
 
@@ -230,6 +230,28 @@ Recipients can reply to the Twilio number. Minimum MVP scope: handling opt-outs 
 
 ---
 ## 4. Specifics of the Polish market
+
+### 4.0 Multi-country extensibility
+
+Poland is the only market implemented today, but the code doesn't hardcode
+`+48` / Polish rules outside of one place: `app/core/countries.py` defines a
+`CountryRules` dataclass (mobile-number prefixes, the `phonenumbers` region
+hint, the diacritic transliteration map, inbound SMS opt-out keywords) and a
+`COUNTRY_REGISTRY: dict[str, CountryRules]` keyed by ISO 3166-1 alpha-2 code.
+`clients.country_code` (default `'PL'`) selects which entry applies to a
+given client. `app/core/phone.py` (`is_mobile_number`) and, from Week 2,
+`app/core/sms_encoding.py` (`prepare_sms_body`) and `app/services/guards.py`
+read from this registry instead of inlining PL-specific literals.
+
+Consequence for the DB layer: `twilio_numbers.phone_e164` uses the generic
+E.164 CHECK (`^\+[1-9][0-9]{6,14}$`), the same one `clients.owner_phone_e164`
+already used — not a PL-only `^\+48[0-9]{9}$` pattern — so a future
+country's numbers aren't rejected at the schema level.
+
+Adding a second country later means: one new `CountryRules` entry in the
+registry, a Regulatory Bundle + number pool purchase in Twilio for that
+country (section 2.3), and QA on that country's opt-out keywords/mobile
+prefixes — not a rewrite of guards.py, phone.py, or the schema.
 
 ### 4.1 Enforcing the E.164 format (+48)
 
@@ -313,6 +335,8 @@ def prepare_sms_body(text: str, *, allow_diacritics: bool, max_segments: int) ->
 
 System rules: (1) an `ai_prompts.allow_diacritics` flag per client, **defaulting to `false`**; (2) the AI system prompt embeds a "max 150 characters, no Polish characters" constraint — code-level transliteration is a safety net, not the only mechanism; (3) **disable** Twilio Smart Encoding on the Messaging Service — we normalize ourselves, deterministically; (4) log `sms_messages.encoding` and `segments` (computed before sending) to monitor cost per client.
 
+Implementation note (Week 2): `PL_TRANSLIT` above is illustrative — in code, `prepare_sms_body` takes a `country_code` and looks up `CountryRules.translit_map` from `app/core/countries.py` (section 4.0) instead of importing a PL-only constant, so a future country supplies its own translit map without touching this function.
+
 ### 4.3 GDPR — call logs and caller data
 
 A caller's phone number is personal data. Legal construction of the service:
@@ -373,6 +397,8 @@ CREATE TABLE clients (
     owner_phone_e164    VARCHAR(16) NOT NULL CHECK (owner_phone_e164 ~ '^\+[1-9][0-9]{6,14}$'),
     status              TEXT NOT NULL DEFAULT 'trial'
                         CHECK (status IN ('trial', 'active', 'suspended', 'cancelled')),
+    country_code        CHAR(2) NOT NULL DEFAULT 'PL' CHECK (country_code ~ '^[A-Z]{2}$'),
+                        -- selects the CountryRules (section 4.0) used for this client
     daily_sms_limit     INT  NOT NULL DEFAULT 100,
     log_retention_days  INT  NOT NULL DEFAULT 90,
     anonymization_salt  TEXT NOT NULL DEFAULT encode(gen_random_bytes(16), 'hex'),
@@ -382,7 +408,9 @@ CREATE TABLE clients (
 CREATE TABLE twilio_numbers (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     client_id     UUID NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
-    phone_e164    VARCHAR(16) UNIQUE NOT NULL CHECK (phone_e164 ~ '^\+48[0-9]{9}$'),
+    -- Generic E.164 shape, not PL-only (+48...): a client's number pool comes
+    -- from whichever country their `clients.country_code` names (section 4.0).
+    phone_e164    VARCHAR(16) UNIQUE NOT NULL CHECK (phone_e164 ~ '^\+[1-9][0-9]{6,14}$'),
     twilio_sid    VARCHAR(64) UNIQUE NOT NULL,          -- PNxxxxxxxx...
     is_active     BOOLEAN NOT NULL DEFAULT true,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -483,14 +511,16 @@ mctb/
 │   │   └── admin.py             # client onboarding, prompts, GDPR (data erasure)
 │   ├── core/
 │   │   ├── security.py          # X-Twilio-Signature validation (FastAPI dependency)
-│   │   ├── phone.py             # normalize_e164, is_anonymous, is_polish_mobile
-│   │   └── sms_encoding.py      # PL_TRANSLIT, GSM7_SAFE, prepare_sms_body, segment counter
+│   │   ├── countries.py         # CountryRules registry (section 4.0) — PL is the only entry today
+│   │   ├── phone.py             # normalize_e164, is_anonymous, is_mobile_number(phone, country_code)
+│   │   └── sms_encoding.py      # GSM7_SAFE, prepare_sms_body(..., country_code=...), segment counter
 │   ├── services/
 │   │   ├── tenant_resolver.py   # To → twilio_numbers → client + prompt (60s cache)
 │   │   ├── guards.py            # cooldown, daily limits, opt-out, loops
 │   │   ├── ai_client.py         # Phase 1 adapter (httpx, timeout, circuit breaker)
 │   │   └── sms_sender.py        # Twilio Messages API + status_callback
 │   ├── models/                  # SQLAlchemy: client, twilio_number, ai_prompt, call_event, sms_message, opt_out
+│   ├── db.py                    # SQLAlchemy engine/session factory (API + Celery + Alembic)
 │   ├── workers/
 │   │   ├── celery_app.py
 │   │   ├── tasks.py             # process_missed_call

@@ -4,7 +4,7 @@ This file gives Claude Code context for the project. Full specification: `spec.m
 
 ## What this project is
 
-Multi-tenant SaaS for the Polish market: a client forwards missed calls (GSM codes set with their carrier) to their assigned virtual Twilio number; the system rejects the call (TwiML `<Reject/>`), identifies the client by the destination number (`To`), generates a reply via AI (Phase 1), and sends a text-back SMS to the caller in Polish.
+Multi-tenant SaaS, currently serving only the Polish market (see spec.md section 4.0 for the country-rules registry that makes adding a second market a config addition, not a rewrite): a client forwards missed calls (GSM codes set with their carrier) to their assigned virtual Twilio number; the system rejects the call (TwiML `<Reject/>`), identifies the client by the destination number (`To`), generates a reply via AI (Phase 1), and sends a text-back SMS to the caller in their local language.
 
 Flow: `Twilio webhook → FastAPI (<1s, TwiML + enqueue only) → Celery worker (guards → AI → SMS) → Twilio Messages API`.
 
@@ -72,9 +72,13 @@ app/services/ai_client.py  # Phase 1 adapter: httpx, 8s timeout, circuit breaker
 app/services/sms_sender.py # Twilio Messages API call + status_callback wiring (spec.md 6.2) —
                             # tasks.py must call into this, not `twilio.messages.create` directly;
                             # the inline call in spec.md 3.4 is illustrative pseudocode, not a file placement
-app/core/phone.py          # normalize_e164, is_anonymous, is_polish_mobile
-app/core/sms_encoding.py   # PL_TRANSLIT, GSM7_SAFE, prepare_sms_body
+app/core/countries.py      # CountryRules registry (spec.md 4.0) — PL is the only entry today;
+                            # add a country here, not by inlining new literals in phone.py/guards.py
+app/core/phone.py          # normalize_e164, is_anonymous, is_mobile_number(phone_e164, country_code)
+app/core/sms_encoding.py   # GSM7_SAFE, prepare_sms_body(..., country_code=...) — translit map comes
+                            # from countries.py, not a hardcoded PL_TRANSLIT constant
 app/models/                # SQLAlchemy — schema matching spec.md section 5
+app/db.py                  # SQLAlchemy engine/session factory, shared by API + Celery + Alembic
 ```
 
 ## Invariants (don't break these without updating spec.md)
