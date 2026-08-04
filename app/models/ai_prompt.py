@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Text,
     text,
@@ -22,6 +23,12 @@ class AiPrompt(Base):
     __tablename__ = "ai_prompts"
     __table_args__ = (
         CheckConstraint("max_sms_segments BETWEEN 1 AND 3", name="ck_ai_prompts_max_segments"),
+        Index(
+            "uq_ai_prompts_active",
+            "client_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -63,35 +63,41 @@ async def voice(
     db: Annotated[Session, Depends(get_db)],
 ) -> Response:
     call_sid = form.get("CallSid", "")
-    to_e164 = normalize_e164(form.get("To"))
-    caller_e164 = normalize_e164(form.get("From"))
-    forwarded_from_e164 = normalize_e164(form.get("ForwardedFrom"))
+    try:
+        to_e164 = normalize_e164(form.get("To"))
+        caller_e164 = normalize_e164(form.get("From"))
+        forwarded_from_e164 = normalize_e164(form.get("ForwardedFrom"))
 
-    twilio_number = None
-    if to_e164 is not None:
-        twilio_number = db.scalar(
-            select(TwilioNumber).where(
-                TwilioNumber.phone_e164 == to_e164, TwilioNumber.is_active.is_(True)
+        twilio_number = None
+        if to_e164 is not None:
+            twilio_number = db.scalar(
+                select(TwilioNumber).where(
+                    TwilioNumber.phone_e164 == to_e164, TwilioNumber.is_active.is_(True)
+                )
             )
-        )
 
-    stmt = (
-        pg_insert(CallEvent)
-        .values(
-            call_sid=call_sid,
-            client_id=twilio_number.client_id if twilio_number else None,
-            twilio_number_id=twilio_number.id if twilio_number else None,
-            caller_e164=caller_e164,
-            forwarded_from=forwarded_from_e164,
+        stmt = (
+            pg_insert(CallEvent)
+            .values(
+                call_sid=call_sid,
+                client_id=twilio_number.client_id if twilio_number else None,
+                twilio_number_id=twilio_number.id if twilio_number else None,
+                caller_e164=caller_e164,
+                forwarded_from=forwarded_from_e164,
+            )
+            .on_conflict_do_nothing(index_elements=["call_sid"])
+            .returning(CallEvent.id)
         )
-        .on_conflict_do_nothing(index_elements=["call_sid"])
-        .returning(CallEvent.id)
-    )
-    inserted_id = db.scalar(stmt)
-    db.commit()
+        inserted_id = db.scalar(stmt)
+        db.commit()
 
-    if inserted_id is not None:
-        process_missed_call.delay(call_sid)
+        if inserted_id is not None:
+            process_missed_call.delay(call_sid)
+    except Exception:
+        # Known pitfall (CLAUDE.md): every error path must still return valid
+        # TwiML, not a raw 500 — the call is rejected either way, but a 500
+        # here would leave Twilio's caller-facing behavior undefined.
+        logger.exception("voice_webhook_unhandled_error", call_sid=call_sid)
 
     return _twiml_reject()
 

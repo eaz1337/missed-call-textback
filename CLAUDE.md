@@ -12,19 +12,19 @@ Flow: `Twilio webhook → FastAPI (<1s, TwiML + enqueue only) → Celery worker 
 
 Follow this after every code change, without exception:
 
-- Lint/type/test tooling lives in the local `venv_ai/` virtualenv (not on PATH, no `uv`/global install) — always invoke it via `venv_ai/bin/`, e.g. `./venv_ai/bin/ruff`, `./venv_ai/bin/mypy`, `./venv_ai/bin/pytest`.
-- After writing or modifying any code, run `./venv_ai/bin/ruff format .` and `./venv_ai/bin/ruff check . --fix` in the terminal to format the code and fix lint errors.
-- Use `./venv_ai/bin/mypy .` to verify typing correctness.
-- Every piece of core business logic (e.g. character sanitization, rate limits, deduplication) **must** have `pytest` tests. After writing tests, run them with `./venv_ai/bin/pytest`.
+- Lint/type/test tooling lives in the project's `uv`-managed `.venv/` (not on PATH) — always invoke it via `.venv/bin/`, e.g. `./.venv/bin/ruff`, `./.venv/bin/mypy`, `./.venv/bin/pytest` (equivalently `uv run ruff`/`uv run mypy`/`uv run pytest`). Dev tools (ruff/mypy/pytest/fakeredis) are the `dev` extra — `uv sync --extra dev` installs them.
+- After writing or modifying any code, run `./.venv/bin/ruff format .` and `./.venv/bin/ruff check . --fix` in the terminal to format the code and fix lint errors.
+- Use `./.venv/bin/mypy app` to verify typing correctness.
+- Every piece of core business logic (e.g. character sanitization, rate limits, deduplication) **must** have `pytest` tests. After writing tests, run them with `./.venv/bin/pytest`.
 - **Write the test immediately after the function, not later.** As soon as a core function is implemented (e.g. `prepare_sms_body`, `normalize_e164`, `acquire_cooldown`), stop and write its test file before moving to the next piece of work — don't batch testing to the end of a session.
 - Don't consider a task done until `ruff format`, `ruff check --fix`, `mypy`, and `pytest` all pass clean. Fix failures before moving on — don't leave them for a later pass.
 
 ```bash
 # run after every change, in this order
-./venv_ai/bin/ruff format .
-./venv_ai/bin/ruff check . --fix
-./venv_ai/bin/mypy .
-./venv_ai/bin/pytest
+./.venv/bin/ruff format .
+./.venv/bin/ruff check . --fix
+./.venv/bin/mypy app
+./.venv/bin/pytest
 ```
 
 ## Commands
@@ -32,7 +32,7 @@ Follow this after every code change, without exception:
 ```bash
 # dev environment
 docker compose up -d db redis
-uv sync                                    # dependencies (pyproject.toml)
+uv sync --extra dev                        # dependencies, incl. ruff/mypy/pytest (pyproject.toml)
 
 # running
 uvicorn app.main:app --reload --port 8000  # API
@@ -43,11 +43,11 @@ celery -A app.workers.celery_app beat -l info   # GDPR jobs / counters
 alembic upgrade head
 alembic revision --autogenerate -m "description"
 
-# tests and code quality — run before every commit (tools live in venv_ai/, not on PATH)
-./venv_ai/bin/pytest                                     # full suite
-./venv_ai/bin/pytest tests/test_sms_encoding.py -v       # GSM-7 golden tests (critical)
-./venv_ai/bin/ruff check . && ./venv_ai/bin/ruff format .
-./venv_ai/bin/mypy app/
+# tests and code quality — run before every commit (tools live in .venv/, not on PATH)
+./.venv/bin/pytest                                     # full suite
+./.venv/bin/pytest tests/test_sms_encoding.py -v       # GSM-7 golden tests (critical)
+./.venv/bin/ruff check . && ./.venv/bin/ruff format .
+./.venv/bin/mypy app
 
 # local webhooks
 ngrok http 8000                            # set PUBLIC_BASE_URL to the ngrok URL,
@@ -97,6 +97,7 @@ app/db.py                  # SQLAlchemy engine/session factory, shared by API + 
 
 ## Code conventions
 
+- **All code and comments are written in English** — identifiers, docstrings, commit messages, and code comments. This applies regardless of the language a conversation with Claude Code happens in.
 - Python 3.12, full type hints, `mypy --strict` on `app/core` and `app/services`.
 - Async in the API layer (FastAPI + httpx); Celery tasks are synchronous (separate SQLAlchemy session per task).
 - Configuration only through `app/config.py` (Pydantic Settings); no `os.environ` scattered through the code.
@@ -118,7 +119,7 @@ app/db.py                  # SQLAlchemy engine/session factory, shared by API + 
 
 ```bash
 # after a task is verified working — no git step
-./venv_ai/bin/ruff format . && ./venv_ai/bin/ruff check . --fix && ./venv_ai/bin/mypy . && ./venv_ai/bin/pytest
+./.venv/bin/ruff format . && ./.venv/bin/ruff check . --fix && ./.venv/bin/mypy app && ./.venv/bin/pytest
 ```
 
 ## Testing

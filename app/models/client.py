@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, String, text
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import CITEXT, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,13 +21,14 @@ class Client(Base):
             r"owner_phone_e164 ~ '^\+[1-9][0-9]{6,14}$'", name="ck_clients_owner_phone"
         ),
         CheckConstraint("country_code ~ '^[A-Z]{2}$'", name="ck_clients_country_code"),
+        UniqueConstraint("email", name="uq_clients_email"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     company_name: Mapped[str] = mapped_column(String, nullable=False)
-    email: Mapped[str] = mapped_column(CITEXT, unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(CITEXT, nullable=False)
     owner_phone_e164: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="trial")
     # Selects the CountryRules (app/core/countries.py) used for this client's

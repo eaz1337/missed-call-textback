@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -29,7 +30,8 @@ class SmsMessage(Base):
     __table_args__ = (
         CheckConstraint(f"encoding IN {SMS_ENCODINGS}", name="ck_sms_messages_encoding"),
         CheckConstraint(f"status IN {SMS_STATUSES}", name="ck_sms_messages_status"),
-        Index("idx_sms_messages_client_time", "client_id", "created_at"),
+        UniqueConstraint("message_sid", name="uq_sms_messages_sid"),
+        Index("idx_sms_messages_client_time", "client_id", text("created_at DESC")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -41,7 +43,7 @@ class SmsMessage(Base):
     client_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("clients.id"), nullable=False
     )
-    message_sid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    message_sid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     to_e164: Mapped[str | None] = mapped_column(String(16), nullable=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
     encoding: Mapped[str] = mapped_column(String, nullable=False, server_default="gsm7")

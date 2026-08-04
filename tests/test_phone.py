@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.phone import is_anonymous, is_mobile_number, normalize_e164
+from app.core.phone import is_anonymous, is_mobile_number, mask_e164, normalize_e164
 
 
 @pytest.mark.parametrize("raw", ["anonymous", "unknown", "restricted", "+266696687", None])
@@ -53,3 +53,15 @@ def test_is_mobile_number_false_for_other_calling_code() -> None:
 def test_is_mobile_number_unknown_country_raises() -> None:
     with pytest.raises(ValueError, match="No CountryRules registered"):
         is_mobile_number("+48501234567", "ZZ")
+
+
+def test_mask_e164_keeps_country_code_and_last_four_digits() -> None:
+    assert mask_e164("+48501234567") == "+4850***4567"
+
+
+def test_mask_e164_none_input() -> None:
+    assert mask_e164(None) == "<none>"
+
+
+def test_mask_e164_short_input_fully_masked() -> None:
+    assert mask_e164("+4850") == "***"

@@ -85,6 +85,26 @@ def test_voice_webhook_duplicate_call_sid_enqueues_once(
     mock_enqueue.assert_called_once_with("CAduplicate000000000000000000001")
 
 
+def test_voice_webhook_unhandled_error_still_returns_reject_twiml(
+    client: TestClient, mock_enqueue: MagicMock
+) -> None:
+    """Known pitfall (CLAUDE.md): every error path must still return valid
+    TwiML, never a raw 500 — here the DB insert succeeds but enqueueing
+    blows up."""
+    mock_enqueue.side_effect = RuntimeError("broker unreachable")
+    form = _voice_form("CAerrorpath00000000000000000001")
+    signature = twilio_signature(VOICE_URL, form)
+
+    response = client.post(
+        "/webhooks/twilio/voice",
+        data=form,
+        headers={"X-Twilio-Signature": signature},
+    )
+
+    assert response.status_code == 200
+    assert "<Reject" in response.text
+
+
 INBOUND_SMS_URL = f"{settings.PUBLIC_BASE_URL}/webhooks/twilio/inbound-sms"
 
 

@@ -37,6 +37,18 @@ def normalize_e164(raw: str | None, default_region: str = DEFAULT_COUNTRY) -> st
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
+def mask_e164(phone: str | None) -> str:
+    """Masks an E.164 number for logging (CLAUDE.md invariant 8): keeps the
+    country code + first digit, hides the middle, keeps the last 4 digits —
+    e.g. '+48501234567' -> '+4850***4567'. Never log a raw phone number.
+    """
+    if phone is None:
+        return "<none>"
+    if len(phone) <= 8:
+        return "***"
+    return f"{phone[:5]}***{phone[-4:]}"
+
+
 def is_mobile_number(phone_e164: str, country_code: str = DEFAULT_COUNTRY) -> bool:
     """Cheap prefix-based mobile heuristic (spec.md 7.4) — not a substitute
     for Twilio Lookup, just enough to reject obvious landlines before

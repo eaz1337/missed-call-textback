@@ -3,7 +3,16 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,6 +26,13 @@ class TwilioNumber(Base):
         # number pool comes from whichever country their CountryRules names;
         # per-country format is validated in app/core/countries.py, not here.
         CheckConstraint(r"phone_e164 ~ '^\+[1-9][0-9]{6,14}$'", name="ck_twilio_numbers_phone"),
+        UniqueConstraint("phone_e164", name="uq_twilio_numbers_phone"),
+        UniqueConstraint("twilio_sid", name="uq_twilio_numbers_sid"),
+        Index(
+            "idx_twilio_numbers_lookup",
+            "phone_e164",
+            postgresql_where=text("is_active"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -25,8 +41,8 @@ class TwilioNumber(Base):
     client_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("clients.id", ondelete="RESTRICT"), nullable=False
     )
-    phone_e164: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
-    twilio_sid: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    phone_e164: Mapped[str] = mapped_column(String(16), nullable=False)
+    twilio_sid: Mapped[str] = mapped_column(String(64), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

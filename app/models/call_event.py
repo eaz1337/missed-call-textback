@@ -4,7 +4,15 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,12 +47,13 @@ class CallEvent(Base):
     __tablename__ = "call_events"
     __table_args__ = (
         CheckConstraint(f"status IN {CALL_EVENT_STATUSES}", name="ck_call_events_status"),
-        Index("idx_call_events_client_time", "client_id", "received_at"),
+        UniqueConstraint("call_sid", name="uq_call_events_call_sid"),
+        Index("idx_call_events_client_time", "client_id", text("received_at DESC")),
         Index(
             "idx_call_events_dedup",
             "client_id",
             "caller_e164",
-            "received_at",
+            text("received_at DESC"),
             postgresql_where=text("caller_e164 IS NOT NULL"),
         ),
     )
@@ -52,7 +61,7 @@ class CallEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    call_sid: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    call_sid: Mapped[str] = mapped_column(String(64), nullable=False)
     client_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True
     )
