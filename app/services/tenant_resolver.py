@@ -32,6 +32,7 @@ class Tenant:
     client_country_code: str
     client_owner_phone_e164: str
     client_daily_sms_limit: int
+    system_prompt: str | None
     fallback_message: str | None
     allow_diacritics: bool
     max_sms_segments: int
@@ -83,6 +84,7 @@ def _load_tenant(db: Session, twilio_number_id: uuid.UUID) -> Tenant | None:
         client_country_code=client.country_code,
         client_owner_phone_e164=client.owner_phone_e164,
         client_daily_sms_limit=client.daily_sms_limit,
+        system_prompt=prompt.system_prompt if prompt else None,
         fallback_message=prompt.fallback_message if prompt else None,
         allow_diacritics=prompt.allow_diacritics if prompt else False,
         max_sms_segments=prompt.max_sms_segments if prompt else 1,

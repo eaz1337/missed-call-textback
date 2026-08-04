@@ -2,10 +2,9 @@
 
 Guard order is significant (cheapest first, CLAUDE.md invariant 3): tenant
 -> anonymous/loop/opted-out/non-mobile -> cooldown -> daily limit -> content
--> send. AI generation (Phase 1) is Week 3 work; until `ai_client.py`
-exists, every send uses `ai_prompts.fallback_message` directly — which is
-exactly the "AI failure never blocks the SMS" path invariant 4 describes,
-just without an AI call to fail yet.
+-> send. Phase 1 AI is integrated (Week 3): try ai_client.generate() with
+8s timeout + circuit breaker; on any error → fallback_message, is_fallback=true,
+zero retries (spec.md invariant 4).
 """
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from app.core.sms_encoding import compute_encoding_and_segments, prepare_sms_bod
 from app.db import SessionLocal
 from app.models import CallEvent, CallEventStatus, SmsMessage
 from app.redis_client import redis_client
+from app.services.ai_client import AiError
+from app.services.ai_client import generate as ai_generate
 from app.services.guards import (
     acquire_cooldown,
     check_daily_limit,
@@ -120,17 +121,35 @@ def _send(
     call_sid: str,
 ) -> None:
     # --- Content generation ---
-    # Week 3 wraps this in a try/except around ai_client.generate()
-    # (invariant 4: AI failure never blocks the SMS); until ai_client.py
-    # exists, every send goes straight to the fallback template.
+    # Try AI first (spec.md 3.4, 7.5); on any error use fallback_message
+    # (invariant 4: AI failure never blocks the SMS, zero retries).
     fallback = tenant.fallback_message
     if fallback is None:
         logger.error("no_active_prompt", call_sid=call_sid, client_id=str(tenant.client_id))
         _mark(db, event, CallEventStatus.NO_TENANT)
         return
 
+    is_fallback = False
+    try:
+        assert tenant.system_prompt is not None  # fallback check above ensures prompt exists
+        ai_response = ai_generate(
+            system_prompt=tenant.system_prompt,
+            caller_e164=caller_e164,
+            client_id=str(tenant.client_id),
+        )
+        body = ai_response.text
+    except AiError as exc:
+        logger.warning(
+            "ai_error_fallback",
+            call_sid=call_sid,
+            client_id=str(tenant.client_id),
+            error=str(exc),
+        )
+        body = fallback
+        is_fallback = True
+
     body = prepare_sms_body(
-        fallback,
+        body,
         allow_diacritics=tenant.allow_diacritics,
         max_segments=tenant.max_sms_segments,
         country_code=tenant.client_country_code,
@@ -158,7 +177,7 @@ def _send(
                     body=body,
                     encoding=encoding,
                     segments=segments,
-                    is_fallback=True,
+                    is_fallback=is_fallback,
                     status="failed",
                     error_code=str(exc.code) if exc.code is not None else None,
                 )
@@ -177,7 +196,7 @@ def _send(
             body=body,
             encoding=encoding,
             segments=segments,
-            is_fallback=True,
+            is_fallback=is_fallback,
         )
     )
     _mark(db, event, CallEventStatus.SMS_QUEUED)

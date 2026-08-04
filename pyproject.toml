@@ -37,6 +37,20 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+[tool.hatch.envs.default]
+features = ["dev"]
+
+[tool.hatch.envs.default.scripts]
+check = "ruff check ."
+format = "ruff format ."
+typecheck = "mypy app"
+lint = [
+    "ruff check .",
+    "ruff format --check .",
+    "mypy app"
+]
+test = "pytest"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

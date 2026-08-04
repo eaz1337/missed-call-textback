@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.core.countries import get_country_rules
 from app.core.phone import normalize_e164
 from app.core.security import verify_twilio_signature
 from app.db import get_db
@@ -125,3 +126,60 @@ async def sms_status(
         logger.info("sms_undeliverable", message_sid=message_sid)
 
     return Response(status_code=204)
+
+
+@router.post("/inbound-sms")
+async def inbound_sms(
+    form: Annotated[dict[str, str], Depends(verify_twilio_signature)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Handles inbound SMS to a Twilio number (spec.md 3.6): opt-out processing
+    (STOP/KONIEC) and opt-in logging (future: notify client).
+
+    spec.md 3.6: if content (trimmed, upper) matches opt-out keywords from the
+    sender's client's CountryRules, append to opt_outs and reply with
+    confirmation. Other replies: log + (optional post-MVP) notify client.
+    """
+    from_e164 = normalize_e164(form.get("From"))
+    to_e164 = normalize_e164(form.get("To"))
+    body = form.get("Body", "").strip().upper()
+
+    if from_e164 is None or to_e164 is None:
+        logger.warning(
+            "inbound_sms_invalid_number", from_raw=form.get("From"), to_raw=form.get("To")
+        )
+        return Response(status_code=204)
+
+    twilio_number = db.scalar(
+        select(TwilioNumber).where(
+            TwilioNumber.phone_e164 == to_e164, TwilioNumber.is_active.is_(True)
+        )
+    )
+
+    if twilio_number is None:
+        logger.warning("inbound_sms_orphan_number", to_e164=to_e164)
+        return Response(status_code=204)
+
+    client = twilio_number.client if hasattr(twilio_number, "client") else None
+    if client is None:
+        from app.models import Client
+
+        client = db.get(Client, twilio_number.client_id)
+    if client is None:
+        logger.warning("inbound_sms_no_client", to_e164=to_e164, client_id=twilio_number.client_id)
+        return Response(status_code=204)
+
+    rules = get_country_rules(client.country_code)
+    is_opt_out = body in rules.opt_out_keywords
+
+    if is_opt_out:
+        record_opt_out(db, client_id=client.id, phone_e164=from_e164, source="sms_stop")
+        logger.info("opt_out_processed", from_e164=from_e164, client_id=str(client.id))
+    else:
+        logger.info(
+            "inbound_sms_reply", from_e164=from_e164, to_e164=to_e164, client_id=str(client.id)
+        )
+
+    # TwiML response: minimal, silent acknowledgement
+    response_twiml = '<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>'
+    return Response(content=response_twiml, media_type="application/xml")
