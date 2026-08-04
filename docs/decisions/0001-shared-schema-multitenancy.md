@@ -4,7 +4,7 @@ Status: Accepted (see spec.md section 2.2 for the full technical detail)
 
 ## Context
 
-MCTB serves many clients (businesses) from one deployment. Each incoming call
+MCTB-RAG serves many clients (businesses) from one deployment. Each incoming call
 must be routed to the right tenant by the destination (`To`) number. We need
 to pick an isolation model before the schema in spec.md section 5 is set in
 stone, since changing it later means a data migration across every table.

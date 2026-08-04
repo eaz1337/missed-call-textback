@@ -8,7 +8,7 @@ from app.core.logging import configure_logging
 
 configure_logging()
 
-celery_app = Celery("mctb", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
+celery_app = Celery("mctb-rag", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 celery_app.autodiscover_tasks(["app.workers"])
 celery_app.autodiscover_tasks(["app.workers"], related_name="beat")
 

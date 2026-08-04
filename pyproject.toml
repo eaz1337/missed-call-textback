@@ -1,7 +1,7 @@
 [project]
-name = "mctb"
+name = "mctb-rag"
 version = "0.1.0"
-description = "Missed Call Text-Back (MCTB) SaaS — Polish market"
+description = "MCTB-RAG SaaS — Polish market"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

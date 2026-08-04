@@ -1,4 +1,4 @@
-# CLAUDE.md — Missed Call Text-Back (MCTB)
+# CLAUDE.md — MCTB-RAG
 
 This file gives Claude Code context for the project. Full specification: `spec.md` (source of truth for architecture, DB schema, and business rules). On conflict: spec.md > CLAUDE.md > code.
 

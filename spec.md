@@ -1,11 +1,13 @@
-# Technical Specification — Missed Call Text-Back (MCTB) SaaS
+# Technical Specification — MCTB-RAG SaaS
 
 | Field | Value |
 |---|---|
-| Version | 1.0 |
-| Status | For implementation |
+| Version | 1.1 |
+| Status | For implementation (Phase 1 = MVP, Phase 2 = RAG — see section 9) |
 | Target market | Poland (+48) — first entry in a country registry (section 4.0), not a hardcoded assumption |
-| Dependencies | Twilio (Voice + SMS), Phase 1 AI module |
+| Dependencies | Twilio (Voice + SMS), Phase 1 AI module, Phase 2 RAG module (section 9) |
+
+**Changelog v1.0 → v1.1:** added enterprise-readiness hooks that cost nothing to build for a small-business client but avoid a rewrite later (`access_group_id` placeholder, auth as a swappable dependency, audit log as an optional hook, RBAC-ready RAG schema). Added section 9, the Phase 2 RAG plan (next implementation step after MVP).
 
 ---
 
@@ -45,13 +47,14 @@ Key properties: the system is **multi-tenant** (a single deployment serves many 
       │                 │  • Twilio number → client (tenant) mapping  │
       │                 │  • guards: dedup / blacklist / limits       │
       │                 │  • AI (Phase 1) → SMS content (8s timeout)  │
+      │                 │  • RAG lookup (Phase 2, section 9) — optional│
       │                 │  • PL normalization (GSM-7 / transliteration)│
       │                 │  • Twilio Messages API → SMS                │
       │                 └───────┬─────────────────────┬───────────────┘
       │                         │                     │
       │                  ┌──────▼──────┐       ┌──────▼──────┐
       │                  │ PostgreSQL  │       │ AI Service  │
-      │                  │ (tenant DB) │       │ (Phase 1)   │
+      │                  │ (tenant DB) │       │ (Phase 1/2) │
       │                  └─────────────┘       └─────────────┘
       │ 5. Text-back SMS (from the client's assistant)
       ◄─────────────────────────────────────────── Twilio SMS
@@ -187,6 +190,11 @@ def process_missed_call(self, call_sid: str):
     # --- Content generation ---
     prompt = db.get_active_prompt(client.id)
     try:
+        # Phase 2 (section 9): ai_client.generate() internally calls the
+        # retriever first when client.rag_enabled is true, and folds the
+        # retrieved chunks into the prompt context. Phase 1 clients (no RAG)
+        # skip straight to generation — same call signature either way, so
+        # this task body doesn't change when Phase 2 ships.
         body = ai_client.generate(prompt, context=event, timeout=8.0)
     except (TimeoutError, AIServiceError):
         body = prompt.fallback_message  # section 7.6
@@ -205,6 +213,7 @@ def process_missed_call(self, call_sid: str):
         status_callback="https://api.<domain>/webhooks/twilio/sms-status",
     )
     db.save_sms(event, msg.sid, body)
+    audit_log.record(client.id, "sms_sent", call_sid=call_sid, sms_sid=msg.sid)  # section 7.7
     event.mark("sms_queued")
 ```
 
@@ -316,7 +325,7 @@ PL_TRANSLIT = str.maketrans(
 # Subset of GSM-7 sufficient for validation after transliteration
 GSM7_SAFE = set(
     "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
-    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑܧ¿abcdefghijklmnopqrstuvwxyzäöñüà"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
 )
 
 
@@ -341,7 +350,7 @@ Implementation note (Week 2): `PL_TRANSLIT` above is illustrative — in code, `
 
 A caller's phone number is personal data. Legal construction of the service:
 
-**Roles.** The client (business) is the **data controller** for the data of people calling their number; the MCTB platform operator is the **data processor** (GDPR Art. 28). A **Data Processing Agreement (DPA)** is required as an integral part of the SaaS terms. Twilio acts as a sub-processor — list it in the DPA's sub-processor list.
+**Roles.** The client (business) is the **data controller** for the data of people calling their number; the MCTB-RAG platform operator is the **data processor** (GDPR Art. 28). A **Data Processing Agreement (DPA)** is required as an integral part of the SaaS terms. Twilio acts as a sub-processor — list it in the DPA's sub-processor list.
 
 **Legal basis for sending the SMS.** Legitimate interest of the controller (GDPR Art. 6(1)(f)): responding to contact initiated by the caller themself. Boundary condition: the SMS content must be **informational** (confirmation of the missed call, callback information, business hours). Marketing content would require separate consent (Electronic Communications Law — prohibition on unsolicited commercial information) — **the AI system prompt must explicitly prohibit promotional content**.
 
@@ -381,7 +390,8 @@ clients 1 ──── N twilio_numbers
    ├──── N call_events N (FK: client_id, twilio_number_id)
    │ 1        │ 1
    │          └──── N sms_messages
-   └──── N opt_outs
+   ├──── N opt_outs
+   └──── N audit_log_entries
 ```
 
 ### 5.2 DDL
@@ -402,6 +412,12 @@ CREATE TABLE clients (
     daily_sms_limit     INT  NOT NULL DEFAULT 100,
     log_retention_days  INT  NOT NULL DEFAULT 90,
     anonymization_salt  TEXT NOT NULL DEFAULT encode(gen_random_bytes(16), 'hex'),
+    -- Enterprise hook, unused by SMB clients: an account tier flag lets the
+    -- app branch on stricter behavior (e.g. mandatory audit logging, RAG
+    -- access-group enforcement) without a schema change when the first
+    -- enterprise client signs. NULL/'standard' behaves exactly like v1.0.
+    account_tier        TEXT NOT NULL DEFAULT 'standard'
+                        CHECK (account_tier IN ('standard', 'enterprise')),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -424,6 +440,10 @@ CREATE TABLE ai_prompts (
     fallback_message  TEXT NOT NULL,        -- static emergency SMS (AI timeout), already GSM-7 safe
     allow_diacritics  BOOLEAN NOT NULL DEFAULT false,
     max_sms_segments  INT NOT NULL DEFAULT 1 CHECK (max_sms_segments BETWEEN 1 AND 3),
+    -- Phase 2 hook (section 9): off by default, so Phase 1 clients are
+    -- byte-for-byte unaffected. When true, ai_client.generate() runs a
+    -- retrieval step against knowledge_chunks before calling the model.
+    rag_enabled       BOOLEAN NOT NULL DEFAULT false,
     version           INT NOT NULL DEFAULT 1,
     is_active         BOOLEAN NOT NULL DEFAULT true,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -477,6 +497,23 @@ CREATE TABLE opt_outs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (client_id, phone_e164)
 );
+
+-- Enterprise hook: append-only audit trail. Cheap to write for every client
+-- (one INSERT, no FK cascade risk), but only surfaced in the admin panel /
+-- required contractually for account_tier = 'enterprise'. Nothing here
+-- blocks the SMB flow — writing to this table is fire-and-forget from the
+-- worker (section 3.4) and never gates a send.
+CREATE TABLE audit_log_entries (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id   UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    actor       TEXT NOT NULL,          -- 'system' | 'worker' | admin user id
+    action      TEXT NOT NULL,          -- e.g. 'sms_sent', 'prompt_updated', 'gdpr_erasure'
+    ref_type    TEXT,                   -- 'call_event' | 'sms_message' | 'ai_prompt' | ...
+    ref_id      UUID,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_audit_log_client_time ON audit_log_entries (client_id, created_at DESC);
 ```
 
 Design notes: `call_events` records **every** webhook event (including filtered ones) — the `status` field is simultaneously the pipeline's outcome and material for statistics and debugging; the unique constraint on `call_sid` provides idempotency on Twilio webhook retries (`INSERT ... ON CONFLICT (call_sid) DO NOTHING` — no insert means a duplicate, and the handler ends).
@@ -492,7 +529,7 @@ Python is the right choice here — the system's profile is I/O-bound webhooks +
 |---|---|---|
 | API / webhooks | **Python 3.12 + FastAPI + Uvicorn** | async I/O, Pydantic validation, < 1s per webhook |
 | Task queue | **Celery 5 + Redis 7** | retry with backoff, beat (GDPR jobs), isolating AI failures from webhooks |
-| Database | **PostgreSQL 16 + SQLAlchemy 2 + Alembic** | constraints from section 5, migrations |
+| Database | **PostgreSQL 16 + SQLAlchemy 2 + Alembic** | constraints from section 5, migrations; `pgvector` extension added in Phase 2 (section 9) — no migration off Postgres needed |
 | Cache / limits | **Redis** (same instance, separate DB) | cooldown, daily counters, Lookup cache |
 | Telephony | **twilio** (SDK), **phonenumbers** | signature validation, E.164 |
 | HTTP to AI | **httpx** | hard timeouts, connection pooling |
@@ -502,7 +539,7 @@ Python is the right choice here — the system's profile is I/O-bound webhooks +
 ### 6.2 Project structure
 
 ```
-mctb/
+mctb-rag/
 ├── app/
 │   ├── main.py                  # FastAPI app factory, routers
 │   ├── config.py                # Pydantic Settings (ENV)
@@ -511,15 +548,24 @@ mctb/
 │   │   └── admin.py             # client onboarding, prompts, GDPR (data erasure)
 │   ├── core/
 │   │   ├── security.py          # X-Twilio-Signature validation (FastAPI dependency)
+│   │   ├── auth.py              # admin-panel auth as a swappable FastAPI dependency —
+│   │   │                        #   API key today, drop-in for OAuth/OIDC/SSO later
+│   │   │                        #   without touching the routes that depend on it
 │   │   ├── countries.py         # CountryRules registry (section 4.0) — PL is the only entry today
 │   │   ├── phone.py             # normalize_e164, is_anonymous, is_mobile_number(phone, country_code)
 │   │   └── sms_encoding.py      # GSM7_SAFE, prepare_sms_body(..., country_code=...), segment counter
 │   ├── services/
 │   │   ├── tenant_resolver.py   # To → twilio_numbers → client + prompt (60s cache)
 │   │   ├── guards.py            # cooldown, daily limits, opt-out, loops
-│   │   ├── ai_client.py         # Phase 1 adapter (httpx, timeout, circuit breaker)
+│   │   ├── ai_client.py         # Phase 1 adapter (httpx, timeout, circuit breaker);
+│   │   │                        #   Phase 2 (section 9) adds an internal retrieval call
+│   │   │                        #   here when ai_prompts.rag_enabled is true
+│   │   ├── retriever.py         # Phase 2 (section 9): embed query, pgvector similarity search
+│   │   ├── audit.py             # audit_log.record(...) — thin wrapper around
+│   │   │                        #   audit_log_entries, fire-and-forget, never blocks a send
 │   │   └── sms_sender.py        # Twilio Messages API + status_callback
-│   ├── models/                  # SQLAlchemy: client, twilio_number, ai_prompt, call_event, sms_message, opt_out
+│   ├── models/                  # SQLAlchemy: client, twilio_number, ai_prompt, call_event,
+│   │   │                        #   sms_message, opt_out, audit_log_entry, (Phase 2: knowledge_chunk)
 │   ├── db.py                    # SQLAlchemy engine/session factory (API + Celery + Alembic)
 │   ├── workers/
 │   │   ├── celery_app.py
@@ -547,6 +593,7 @@ TWILIO_REGION=ie1                      # EU region (GDPR)
 PUBLIC_BASE_URL=https://api.example.pl # for URL reconstruction during signature validation
 AI_SERVICE_URL=http://ai-service:8080  # Phase 1
 AI_TIMEOUT_SECONDS=8
+EMBEDDING_SERVICE_URL=                 # Phase 2 (section 9) — empty/unused until then
 SENTRY_DSN=
 ```
 
@@ -584,7 +631,7 @@ Loop scenarios and their blocks (all end with a `loop_detected` status, zero sen
 
 | Scenario | Block |
 |---|---|
-| The caller is a Twilio number from our own system (e.g. two MCTB clients call each other and both don't answer) | `From` checked against the full `twilio_numbers` table (Redis-cached set, refreshed on provisioning) |
+| The caller is a Twilio number from our own system (e.g. two MCTB-RAG clients call each other and both don't answer) | `From` checked against the full `twilio_numbers` table (Redis-cached set, refreshed on provisioning) |
 | The client calls their own Twilio number "to test it," or `ForwardedFrom == From` | `From == clients.owner_phone_e164` or `From == ForwardedFrom` → drop |
 | The reply SMS lands on a number with SMS→voice forwarding at an exotic carrier | one-shot design: SMS is sent only in reaction to a `call_event`, never in response to an inbound SMS |
 | Repeated calls from the same number (deliberately running up costs) | cooldown from 7.3 + daily limit per client |
@@ -615,6 +662,7 @@ Overarching rule: **an AI failure never blocks the SMS** — the caller gets a r
 - `httpx` with a hard `AI_TIMEOUT_SECONDS=8` timeout (2s connect, 6s read). No retry to AI within the same event — a retry would mean an SMS several minutes later, which hurts UX; instead, an immediate **fallback**: `ai_prompts.fallback_message` (static, verified as GSM-7-safe when saved in the panel), `sms_messages.is_fallback = true`.
 - **Circuit breaker**: ≥ 5 consecutive AI errors within 60s → open the circuit for 2 minutes (all events go straight to fallback, without waiting for a timeout) + alert. After 2 minutes, a single trial request (half-open).
 - A `fallback_rate` metric on the dashboard — an increase > 5% is an incident.
+- Phase 2 note (section 9): the same rule applies to the retrieval step — if `retriever.py` times out or errors, generation proceeds **without** retrieved context rather than failing the whole request. Retrieval is an enhancement, never a hard dependency.
 
 ### 7.6 Idempotency and retries
 
@@ -625,7 +673,7 @@ Overarching rule: **an AI failure never blocks the SMS** — the caller gets a r
 ### 7.7 Application security
 
 - Secrets only in ENV/secret manager; the Twilio auth token never appears in logs (structlog filter).
-- Admin panel: OAuth/OIDC + roles; GDPR endpoints (data erasure) audited in a separate log.
+- Admin panel: auth goes through `app/core/auth.py` (section 6.2) as a single FastAPI dependency — API key for the MVP, swappable for OAuth/OIDC/SSO for an enterprise client without touching route handlers. GDPR endpoints (data erasure) additionally write to `audit_log_entries` (section 5.2).
 - AI-generated content is sent on the client's behalf — the system prompt carries hard prohibitions: no caller PII in the body, no promised deadlines, no marketing content, no links (links in an SMS from an unknown number look like phishing and hurt delivery rates).
 - PostgreSQL backups encrypted, stored in the EU, backup retention ≤ data retention + 30 days (consistent with GDPR).
 
@@ -642,11 +690,130 @@ Overarching rule: **an AI failure never blocks the SMS** — the caller gets a r
 
 ---
 
-## 8. MVP scope and rollout order
+## 8. MVP scope and rollout order (Phase 1)
 
 1. **Week 1:** models + migrations (section 5), Voice webhook with signature validation and TwiML `<Reject/>`, `call_sid` idempotency.
 2. **Week 2:** Celery worker with the full guard chain (3.4), `sms_encoding` module with golden tests, SMS sending + status callback.
 3. **Week 3:** AI integration (Phase 1) with timeout, fallback, and circuit breaker; inbound SMS (STOP/KONIEC); GDPR jobs (anonymization).
 4. **Week 4:** admin panel (onboarding, prompts, per-client log view), monitoring, end-to-end tests on a production number.
 
-Beyond MVP (backlog): self-service client panel, client notifications about missed calls (push/email), two-way SMS conversation with AI, usage-based billing, Twilio Lookup.
+Phase 1 is feature-complete and deployable to a real client without section 9. Section 9 is the next phase, started only after Phase 1 is stable in production.
+
+---
+
+## 9. Phase 2 — RAG (Retrieval-Augmented Generation)
+
+### 9.1 Goal
+
+Today, `ai_prompts.system_prompt` is a single static text field — everything the assistant "knows" about the client's business (hours, pricing, services, policies) has to be hand-written into one prompt and manually kept up to date. Phase 2 lets a client upload source documents (PDF, plain text, pasted FAQ) once; the system retrieves the most relevant snippets per incoming call and folds them into the generation context, instead of stuffing everything into the system prompt every time.
+
+This is additive: `ai_prompts.rag_enabled` (section 5.2) defaults to `false`. Phase 1 clients are completely unaffected until a client is explicitly switched on.
+
+### 9.2 New tables
+
+```sql
+CREATE EXTENSION IF NOT EXISTS "vector";  -- pgvector
+
+CREATE TABLE knowledge_documents (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id     UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    -- Enterprise hook: nullable today, always NULL for SMB clients. When an
+    -- enterprise client needs "different staff see different documents"
+    -- (e.g. franchise locations, internal vs. public FAQ), this groups
+    -- documents without a schema change — the retriever (9.4) already
+    -- filters on it.
+    access_group_id UUID,
+    source_type   TEXT NOT NULL CHECK (source_type IN ('pdf', 'text', 'faq_pair')),
+    title         TEXT NOT NULL,
+    raw_text      TEXT NOT NULL,          -- extracted, pre-chunking
+    status        TEXT NOT NULL DEFAULT 'processing'
+                  CHECK (status IN ('processing', 'ready', 'failed')),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE knowledge_chunks (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id    UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    client_id      UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,  -- denormalized for fast filtering
+    access_group_id UUID,                 -- copied from the parent document, see above
+    chunk_index    INT NOT NULL,
+    content        TEXT NOT NULL,
+    embedding      vector(1536) NOT NULL, -- dimension depends on the embedding model chosen
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_knowledge_chunks_client ON knowledge_chunks (client_id);
+CREATE INDEX idx_knowledge_chunks_embedding ON knowledge_chunks
+    USING hnsw (embedding vector_cosine_ops);
+```
+
+Every retrieval query filters on `client_id` first (`WHERE client_id = :client_id ORDER BY embedding <=> :query_embedding LIMIT 5`) — this is the tenant isolation boundary, same principle as every other table in section 5. `access_group_id` is a second, optional filter layered on top for the enterprise case; it costs nothing for clients who never set it.
+
+### 9.3 Ingestion pipeline
+
+1. Client uploads a document (or pastes FAQ text) via the admin panel → `knowledge_documents` row, `status = 'processing'`.
+2. A Celery task: extract text (PDF → plain text), chunk it (~300–500 tokens per chunk, with overlap), call the embedding model per chunk, write rows to `knowledge_chunks`, flip `knowledge_documents.status = 'ready'`.
+3. Re-ingestion on edit: delete the document's existing chunks and re-chunk, rather than trying to diff — documents here are small enough (business FAQ/pricing, not a legal corpus) that this is simpler and safer than incremental updates.
+
+### 9.4 Retrieval integration
+
+`app/services/retriever.py` (new):
+
+```python
+def retrieve(client_id: str, query: str, access_group_id: str | None, k: int = 5) -> list[str]:
+    query_embedding = embed(query)  # same model used at ingestion time
+    filters = "client_id = :client_id"
+    if access_group_id is not None:
+        filters += " AND (access_group_id = :access_group_id OR access_group_id IS NULL)"
+    rows = db.execute(
+        f"""
+        SELECT content FROM knowledge_chunks
+        WHERE {filters}
+        ORDER BY embedding <=> :query_embedding
+        LIMIT :k
+    """,
+        client_id=client_id,
+        access_group_id=access_group_id,
+        query_embedding=query_embedding,
+        k=k,
+    )
+    return [r.content for r in rows]
+```
+
+`ai_client.generate()` (existing, section 6.2) changes to:
+
+```python
+def generate(prompt, context, timeout=8.0):
+    extra_context = ""
+    if prompt.rag_enabled:
+        try:
+            chunks = retriever.retrieve(prompt.client_id, query=context.caller_intent_hint, ...)
+            extra_context = "\n".join(chunks)
+        except (TimeoutError, DBError):
+            pass  # retrieval is best-effort — see section 7.5
+    return ai_service.call(prompt.system_prompt, extra_context, context, timeout=timeout)
+```
+
+No change to `process_missed_call` (section 3.4) is required — the call signature to `ai_client.generate()` stays the same.
+
+### 9.5 Evaluation (don't skip this)
+
+A RAG feature that "looks like it works" on three manual tests is not a portfolio-credible RAG feature. Minimum evaluation before calling Phase 2 done:
+
+- A small labeled test set per client (~20–30 question/expected-answer pairs from real FAQ content).
+- **Retrieval precision@k**: for each test question, is the chunk containing the right answer in the top-k retrieved?
+- **Faithfulness / hallucination check**: does the generated SMS only assert things present in the retrieved chunks, or does it invent details (e.g. a price that isn't in any document)? Spot-check manually for the first client, then consider an LLM-as-judge pass for scale.
+- Track `fallback_rate` and a new `retrieval_miss_rate` (queries where no chunk cleared a similarity threshold) on the same dashboard as section 7.8.
+
+### 9.6 Rollout order (Phase 2)
+
+1. `knowledge_documents` / `knowledge_chunks` migration + pgvector extension.
+2. Ingestion pipeline (upload → chunk → embed) for one client, manually verified.
+3. `retriever.py` + `ai_client.generate()` integration, `rag_enabled` flag wiring.
+4. Evaluation set (9.5) for that client; only then turn `rag_enabled` on for others.
+5. Admin panel: document upload/management UI.
+
+---
+
+## 10. Beyond Phase 2 (backlog)
+
+Self-service client panel, client notifications about missed calls (push/email), two-way SMS conversation with AI, usage-based billing, Twilio Lookup, multi-agent classification/generation/validation split (evaluate only if a specific client need justifies the added latency/cost — see discussion on multi-agent vs. single-call generation for this SMS-length use case).

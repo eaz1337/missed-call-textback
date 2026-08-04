@@ -30,7 +30,7 @@ def is_loop_caller(
 ) -> bool:
     """spec.md 7.2: the client calling their own number, a carrier echoing
     ForwardedFrom back as From, or a caller that's itself one of our
-    Twilio numbers (two MCTB clients calling each other).
+    Twilio numbers (two MCTB-RAG clients calling each other).
     """
     if caller_e164 == owner_phone_e164:
         return True
